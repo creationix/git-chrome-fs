@@ -1,7 +1,6 @@
 var pathJoin = require('pathjoin');
 var inflate = require('js-git/lib/inflate');
 var deflate = require('js-git/lib/deflate');
-var modes = require('js-git/lib/modes');
 var sha1 = require('git-sha1');
 var codec = require('js-git/lib/object-codec');
 
