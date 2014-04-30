@@ -30,8 +30,7 @@ module.exports = function (repo, entry) {
 
 function loadAs(type, hash, callback) {
   if (!callback) return loadAs.bind(this, type, hash);
-  var path = pathJoin(this.rootPath, "objects", hash.substring(0, 2), hash.substring(2));
-  readBinary(path, function (err, buffer) {
+  this.loadRaw(hash, function (err, buffer) {
     if (buffer === undefined) return callback(err);
     var body;
     try {
@@ -58,8 +57,7 @@ function saveAs(type, value, callback) {
     buffer = deflate(raw);
   }
   catch (err) { return callback(err); }
-  var path = pathJoin(this.rootPath, "objects", hash.substring(0, 2), hash.substring(2));
-  writeBinary(path, buffer, function (err) {
+  this.saveRaw(hash, buffer, function (err) {
     if (err) return callback(err);
     callback(null, hash);
   });
@@ -67,20 +65,47 @@ function saveAs(type, value, callback) {
 
 function loadRaw(hash, callback) {
   if (!callback) return loadRaw.bind(this, hash);
-  callback(new Error("TODO: Implement loadRaw"));
+  var repo = this;
+  var path = pathJoin(repo.rootPath, "objects", hash.substring(0, 2), hash.substring(2));
+  readBinary(path, function (err, buffer) {
+    if (err) return callback(err);
+    if (buffer) return callback(null, buffer);
+    return loadRawPacked(repo, hash, callback);
+  });
+}
+
+function loadRawPacked(repo, hash, callback) {
+  return callback(new Error("TODO: Implement reading from packfile"));
 }
 
 function saveRaw(hash, binary, callback) {
   if (!callback) return saveRaw.bind(this, hash, binary);
-  callback(new Error("TODO: Implement saveRaw"));
+  var path = pathJoin(this.rootPath, "objects", hash.substring(0, 2), hash.substring(2));
+  writeBinary(path, buffer, callback);
 }
 
 function readRef(ref, callback) {
   if (!callback) return readRef.bind(this, ref);
-  var path = pathJoin(this.rootPath, ref);
+  var repo = this;
+  var path = pathJoin(repo.rootPath, ref);
+  readText(path, function (err, text) {
+    if (err) return callback(err);
+    if (text === undefined) {
+      return readPackedRef(repo, ref, callback);
+    }
+    callback(null, text.trim());
+  });
+}
+
+function readPackedRef(repo, ref, callback) {
+  var path = pathJoin(repo.rootPath, "packed-refs");
   readText(path, function (err, text) {
     if (text === undefined) return callback(err);
-    callback(null, text.trim());
+    var index = text.indexOf(ref);
+    if (index >= 0) {
+      return callback(null, text.substring(index - 41, index - 1));
+    }
+    callback();
   });
 }
 
@@ -113,6 +138,7 @@ function get(path, method, options, callback) {
   }
 
   function onError(err) {
+    if (err.name === "NotFoundError") return callback();
     console.error(path, err);
     callback(new Error("Problem getting entry: " + path));
   }
