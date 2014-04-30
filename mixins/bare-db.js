@@ -76,6 +76,9 @@ function loadRaw(hash, callback) {
 
 function loadRawPacked(repo, hash, callback) {
   return callback(new Error("TODO: Implement reading from packfile"));
+  // TODO: Look for version 2 pack-*.idx files starting with ff 74 4f 63
+  // https://www.kernel.org/pub/software/scm/git/docs/technical/pack-format.txt
+  // We should cache these in ram since the filename is content-addressable.
 }
 
 function saveRaw(hash, binary, callback) {
