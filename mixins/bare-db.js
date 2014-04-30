@@ -75,10 +75,38 @@ function loadRaw(hash, callback) {
 }
 
 function loadRawPacked(repo, hash, callback) {
-  return callback(new Error("TODO: Implement reading from packfile"));
-  // TODO: Look for version 2 pack-*.idx files starting with ff 74 4f 63
-  // https://www.kernel.org/pub/software/scm/git/docs/technical/pack-format.txt
-  // We should cache these in ram since the filename is content-addressable.
+  var packDir = pathJoin(repo.rootPath, "objects/pack");
+  console.log("Looking for packdir", packDir);
+  var packHashes = [];
+  readDir(packDir, function (err, entries) {
+    if (!entries) return callback(err);
+    entries.forEach(function (name) {
+      var match = name.match(/pack-([0-9a-f]{40}).idx/);
+      if (match) packHashes.push(match[1]);
+    });
+    start();
+  });
+  function start() {
+    var hash = packHashes.pop();
+    if (!hash) return callback();
+    var indexFile = pathJoin(packDir, "pack-" + hash + ".idx" );
+    var packFile = pathJoin(packDir, "pack-" + hash + ".pack" );
+    readBinary(indexFile, function (err, buffer) {
+      if (!buffer) return callback(err);
+      if (buffer[0] !== 0xff ||
+          buffer[1] !== 0x74 ||
+          buffer[2] !== 0x4f ||
+          buffer[3] !== 0x63) {
+        return callback(new Error("Only v2 pack indexes supported"));
+      }
+      console.log({
+        index: indexFile,
+        pack: packFile,
+        buffer: buffer
+      });
+      // TODO: Implement more
+    });
+  }
 }
 
 function saveRaw(hash, binary, callback) {
@@ -113,12 +141,10 @@ function readPackedRef(repo, ref, callback) {
 }
 
 function updateRef(ref, hash, callback) {
-  console.log("updateRef", ref, hash);
   if (!callback) return updateRef.bind(this, ref, hash);
   var path = pathJoin(this.rootPath, ref);
   writeBinary(path, hash + "\n", callback);
 }
-
 
 var entryCache = {};
 
@@ -178,27 +204,48 @@ function readBinary(path, callback) {
   });
 }
 
+function readDir(path, callback) {
+  callback = oneshot(callback);
+  get(path, "getDirectory", {}, function (err, dir) {
+    if (!dir) return callback(err);
+    var entries = [];
+    var dirReader = dir.createReader();
+    dirReader.readEntries(onEntries, onError);
+    function onEntries(results) {
+      if (!results.length) return callback(null, entries);
+      for (var i = 0, l = results.length; i < l; i++) {
+        var entry = results[i];
+        entryCache[pathJoin(path, entry.name)] = entry;
+        entries.push(entry.name);
+      }
+      dirReader.readEntries(onEntries, onError);
+    }
+  });
+
+  function onError(err) {
+    if (err.name === "NotFoundError") return callback();
+    console.error(path, err);
+    callback(new Error("Problem reading directory: " + path));
+  }
+}
+
 function writeBinary(path, buffer, callback) {
-  console.log("writeBinary", path);
   var truncated = false;
 
   get(path, "getFile", {create:true}, onFile);
 
   function onFile(err, file) {
     if (!file) return callback(err);
-    console.log("onFile", path, file);
     file.createWriter(onWriter, onError);
   }
 
   function onError(err) {
-    console.log("onError", path, err);
     console.error(err);
     // return callback(new Error("Problem writing file: " + path));
   }
 
   // Setup the writer and start the write
   function onWriter(fileWriter) {
-    console.log("onWriter", path, fileWriter);
     fileWriter.onwriteend = onWriteEnd;
     fileWriter.onerror = onError;
     fileWriter.write(new Blob([buffer]));
@@ -206,7 +253,6 @@ function writeBinary(path, buffer, callback) {
 
   // This gets called twice.  The first calls truncate and then comes back.
   function onWriteEnd() {
-    console.log("onWriteEnd", path);
     if (truncated) {
       return callback();
     }
