@@ -146,11 +146,7 @@ function loadRawPacked(repo, hash, callback) {
           var object = codec.deframe(base);
           var body;
           try {
-            body = applyDelta(entry.body, object.body);
-            console.log("BASE", bodec.toRaw(object.body));
-            console.log({DELTA: bodec.toRaw(entry.body)});
-            console.log("FINAL", bodec.toRaw(body));
-            object.body = body;
+            object.body = applyDelta(entry.body, object.body);
             buffer = codec.frame(object);
           }
           catch (err) { return callback(err); }
