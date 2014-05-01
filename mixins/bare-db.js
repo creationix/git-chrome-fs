@@ -9,19 +9,20 @@ module.exports = function (repo, entry) {
   function init(callback) {
     fileSystem.restoreEntry(entry, function (result) {
       if (result) {
-        var rootPath = pathJoin(result.fullPath);
+        var rootPath = repo.rootPath = pathJoin(result.fullPath);
         entryCache[rootPath] = result;
-        fsDb(repo, {
-          readFile: readFile,
-          readChunk: readChunk,
-          readDir: readDir,
-          writeFile: writeFile
-        }, rootPath);
         return callback();
       }
       callback(new Error("Can't restore entry: " + entry));
     });
   }
+
+  fsDb(repo, {
+    readFile: readFile,
+    readChunk: readChunk,
+    readDir: readDir,
+    writeFile: writeFile
+  });
 
 };
 
