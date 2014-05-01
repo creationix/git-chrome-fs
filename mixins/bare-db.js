@@ -4,7 +4,7 @@ var inflate = require('js-git/lib/inflate');
 var deflate = require('js-git/lib/deflate');
 var sha1 = require('git-sha1');
 var codec = require('js-git/lib/object-codec');
-var numToType = require('js-git/lib/pack-codec').numToType;
+var parsePackEntry = require('js-git/lib/pack-codec').parseEntry;
 
 var fileSystem = window.chrome.fileSystem;
 module.exports = function (repo, entry) {
@@ -119,14 +119,21 @@ function loadRawPacked(repo, hash, callback) {
       if (!index) return start();
       readChunk(packFile, index.start, index.end, function (err, chunk) {
         if (!chunk) return callback(err);
-        var entry;
-        try { entry = parsePackEntry(chunk); }
-        catch (err) { return callback(err); }
-
-        if (entry.type === "ofs-delta" || entry.type === "ref-delta") {
-          return callback(new Error("TODO: Implement deltas"));
+        var raw;
+        try {
+          var entry = parsePackEntry(chunk);
+          if (entry.type === "ref-delta") {
+            console.error(hash, entry)
+            throw new Error("TODO: Implement ref-delta");
+          }
+          else if (entry.type === "ofs-delta") {
+            console.error(hash, entry)
+            throw new Error("TODO: Implement ofs-delta");
+          }
+          raw = codec.frame(entry);
         }
-        callback(null, codec.frame(entry));
+        catch (err) { return callback(err); }
+        callback(null, raw);
       });
     }
   }
@@ -375,25 +382,6 @@ function parseIndex(buffer) {
   };
 }
 
-function parsePackEntry(chunk) {
-  var offset = 1;
-  var type = (chunk[0] >> 4) & 0x7;
-  var size = chunk[0] & 0xf;
-  var left = 4;
-  do {
-    size |= (chunk[offset] & 0x7f) << left;
-    left += 7;
-  } while (chunk[++offset] & 0x80);
-  size = size >>> 0;
-  var body = inflate(bodec.slice(chunk, offset));
-  if (body.length !== size) {
-    throw new Error("Size mismatch");
-  }
-  return {
-    type: numToType[type],
-    body: body
-  };
-}
 
 function readUint32(buffer, offset) {
   return (buffer[offset] << 24 |
