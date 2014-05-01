@@ -1,8 +1,10 @@
 var pathJoin = require('pathjoin');
+var bodec = require('bodec');
 var inflate = require('js-git/lib/inflate');
 var deflate = require('js-git/lib/deflate');
 var sha1 = require('git-sha1');
 var codec = require('js-git/lib/object-codec');
+var numToType = require('js-git/lib/pack-codec').numToType;
 
 var fileSystem = window.chrome.fileSystem;
 module.exports = function (repo, entry) {
@@ -30,11 +32,10 @@ module.exports = function (repo, entry) {
 
 function loadAs(type, hash, callback) {
   if (!callback) return loadAs.bind(this, type, hash);
-  this.loadRaw(hash, function (err, buffer) {
-    if (buffer === undefined) return callback(err);
+  this.loadRaw(hash, function (err, raw) {
+    if (raw === undefined) return callback(err);
     var body;
     try {
-      var raw = inflate(buffer);
       if (sha1(raw) !== hash) throw new TypeError("Hash verification failure");
       raw = codec.deframe(raw);
       if (raw.type !== type) throw new TypeError("Type mismatch");
@@ -47,17 +48,16 @@ function loadAs(type, hash, callback) {
 
 function saveAs(type, value, callback) {
   if (!callback) return saveAs.bind(this, type, value);
-  var buffer, hash;
+  var raw, hash;
   try {
-    var raw = codec.frame({
+    raw = codec.frame({
       type: type,
       body: codec.encoders[type](value)
     });
     hash = sha1(raw);
-    buffer = deflate(raw);
   }
   catch (err) { return callback(err); }
-  this.saveRaw(hash, buffer, function (err) {
+  this.saveRaw(hash, raw, function (err) {
     if (err) return callback(err);
     callback(null, hash);
   });
@@ -69,14 +69,19 @@ function loadRaw(hash, callback) {
   var path = pathJoin(repo.rootPath, "objects", hash.substring(0, 2), hash.substring(2));
   readBinary(path, function (err, buffer) {
     if (err) return callback(err);
-    if (buffer) return callback(null, buffer);
+    if (buffer) {
+      var raw;
+      try { raw = inflate(buffer); }
+      catch (err) { return callback(err); }
+      return callback(null, raw);
+    }
     return loadRawPacked(repo, hash, callback);
   });
 }
 
+var cachedIndexes = {};
 function loadRawPacked(repo, hash, callback) {
   var packDir = pathJoin(repo.rootPath, "objects/pack");
-  console.log("Looking for packdir", packDir);
   var packHashes = [];
   readDir(packDir, function (err, entries) {
     if (!entries) return callback(err);
@@ -87,31 +92,52 @@ function loadRawPacked(repo, hash, callback) {
     start();
   });
   function start() {
-    var hash = packHashes.pop();
-    if (!hash) return callback();
-    var indexFile = pathJoin(packDir, "pack-" + hash + ".idx" );
-    var packFile = pathJoin(packDir, "pack-" + hash + ".pack" );
-    readBinary(indexFile, function (err, buffer) {
-      if (!buffer) return callback(err);
-      if (buffer[0] !== 0xff ||
-          buffer[1] !== 0x74 ||
-          buffer[2] !== 0x4f ||
-          buffer[3] !== 0x63) {
-        return callback(new Error("Only v2 pack indexes supported"));
-      }
-      console.log({
-        index: indexFile,
-        pack: packFile,
-        buffer: buffer
+    var packHash = packHashes.pop();
+    if (!packHash) return callback();
+    var indexes = cachedIndexes[packHash];
+    if (!indexes) loadIndex(packHash);
+    else onIndex();
+
+    function loadIndex() {
+      var indexFile = pathJoin(packDir, "pack-" + packHash + ".idx" );
+      readBinary(indexFile, function (err, buffer) {
+        if (!buffer) return callback(err);
+        try {
+          var result = parseIndex(buffer);
+          // TODO store result.checksum and check against packfile
+          indexes = result.indexes;
+        }
+        catch (err) { return callback(err); }
+        cachedIndexes[packHash] = indexes;
+        onIndex();
       });
-      // TODO: Implement more
-    });
+    }
+
+    function onIndex() {
+      var packFile = pathJoin(packDir, "pack-" + packHash + ".pack" );
+      var index = indexes[hash];
+      if (!index) return start();
+      readChunk(packFile, index.start, index.end, function (err, chunk) {
+        if (!chunk) return callback(err);
+        var entry;
+        try { entry = parsePackEntry(chunk); }
+        catch (err) { return callback(err); }
+
+        if (entry.type === "ofs-delta" || entry.type === "ref-delta") {
+          return callback(new Error("TODO: Implement deltas"));
+        }
+        callback(null, codec.frame(entry));
+      });
+    }
   }
 }
 
-function saveRaw(hash, binary, callback) {
-  if (!callback) return saveRaw.bind(this, hash, binary);
+function saveRaw(hash, raw, callback) {
+  if (!callback) return saveRaw.bind(this, hash, raw);
   var path = pathJoin(this.rootPath, "objects", hash.substring(0, 2), hash.substring(2));
+  var buffer;
+  try { buffer = deflate(raw); }
+  catch (err) { return callback(err); }
   writeBinary(path, buffer, callback);
 }
 
@@ -148,7 +174,7 @@ function updateRef(ref, hash, callback) {
 
 var entryCache = {};
 
-function get(path, method, options, callback) {
+function getEntry(path, method, options, callback) {
   var entry = entryCache[path];
   if (entry) return callback(null, entry);
   if (!path) return callback();
@@ -174,13 +200,26 @@ function get(path, method, options, callback) {
 }
 
 function getDir(path, callback) {
-  get(path, "getDirectory", {create:true}, callback);
+  getEntry(path, "getDirectory", {create:true}, callback);
 }
 
 function getFile(path, callback) {
-  get(path, "getFile", {}, callback);
+  getEntry(path, "getFile", {}, callback);
 }
 
+function readChunk(path, start, end, callback) {
+  callback = oneshot(callback);
+  getFile(path, function (err, entry) {
+    if (!entry) return callback(err);
+    var reader = new FileReader();
+    reader.onloadend = function () {
+      callback(null, new Uint8Array(this.result));
+    };
+    entry.file(function (file) {
+      reader.readAsArrayBuffer(file.slice(start, end));
+    });
+  });
+}
 
 function read(path, formatter, callback) {
   getFile(path, function (err, entry) {
@@ -206,7 +245,7 @@ function readBinary(path, callback) {
 
 function readDir(path, callback) {
   callback = oneshot(callback);
-  get(path, "getDirectory", {}, function (err, dir) {
+  getEntry(path, "getDirectory", {}, function (err, dir) {
     if (!dir) return callback(err);
     var entries = [];
     var dirReader = dir.createReader();
@@ -278,4 +317,106 @@ function oneshot(callback) {
     done = true;
     return callback.apply(this, arguments);
   };
+}
+
+function parseIndex(buffer) {
+  if (readUint32(buffer, 0) !== 0xff744f63 ||
+      readUint32(buffer, 4) !== 0x00000002) {
+    throw new Error("Only v2 pack indexes supported");
+  }
+
+  // Get the number of hashes in index
+  // This is the value of the last fan-out entry
+  var hashOffset = 8 + 255 * 4;
+  var length = readUint32(buffer, hashOffset);
+  hashOffset += 4;
+  var crcOffset = hashOffset + 20 * length;
+  var lengthOffset = crcOffset + 4 * length;
+  var largeOffset = lengthOffset + 4 * length;
+  var checkOffset = largeOffset;
+  var indexes = new Array(length);
+  for (var i = 0; i < length; i++) {
+    var start = hashOffset + i * 20;
+    var hash = bodec.toHex(bodec.slice(buffer, start, start + 20));
+    var crc = readUint32(buffer, crcOffset + i * 4);
+    var offset = readUint32(buffer, lengthOffset + i * 4);
+    if (offset & 0x80000000) {
+      offset = largeOffset + (offset &0x7fffffff) * 8;
+      checkOffset = Math.max(checkOffset, offset + 8);
+      offset = readUint64(buffer, offset);
+    }
+    indexes[i] = {
+      hash: hash,
+      offset: offset,
+      crc: crc
+    };
+  }
+  var packChecksum = bodec.toHex(bodec.slice(buffer, checkOffset, checkOffset + 20));
+  var checksum = bodec.toHex(bodec.slice(buffer, checkOffset + 20, checkOffset + 40));
+  var hash = sha1(bodec.slice(buffer, 0, checkOffset + 20));
+  if (hash !== checksum) throw new Error("Checksum mistmatch");
+
+  var byHash = {};
+  indexes.sort(function (a, b) {
+    return a.offset - b.offset;
+  });
+  indexes.forEach(function (data, i) {
+    var next = indexes[i + 1];
+    byHash[data.hash] = {
+      crc: data.crc,
+      start: data.offset,
+      end: next ? next.offset : -20 // last item ends 20 bytes in from pack end.
+    };
+  });
+
+  return {
+    indexes: byHash,
+    checksum: packChecksum
+  };
+}
+
+function parsePackEntry(chunk) {
+  var offset = 1;
+  var type = (chunk[0] >> 4) & 0x7;
+  var size = chunk[0] & 0xf;
+  var left = 4;
+  do {
+    size |= (chunk[offset] & 0x7f) << left;
+    left += 7;
+  } while (chunk[++offset] & 0x80);
+  size = size >>> 0;
+  var body = inflate(bodec.slice(chunk, offset));
+  if (body.length !== size) {
+    throw new Error("Size mismatch");
+  }
+  return {
+    type: numToType[type],
+    body: body
+  };
+}
+
+function readUint32(buffer, offset) {
+  return (buffer[offset] << 24 |
+          buffer[offset + 1] << 16 |
+          buffer[offset + 2] << 8 |
+          buffer[offset + 3] << 0) >>> 0;
+}
+
+// Yes this will lose precision over 2^53, but that can't be helped when
+// returning a single integer.
+// We simply won't support packfiles over 8 petabytes. I'm ok with that.
+function readUint64(buffer, offset) {
+  var hi = (buffer[offset] << 24 |
+            buffer[offset + 1] << 16 |
+            buffer[offset + 2] << 8 |
+            buffer[offset + 3] << 0) >>> 0;
+  var lo = (buffer[offset + 4] << 24 |
+            buffer[offset + 5] << 16 |
+            buffer[offset + 6] << 8 |
+            buffer[offset + 7] << 0) >>> 0;
+  return hi * 0x100000000 + lo;
+}
+
+function readBinaryHex(buffer, offset) {
+  return bodec.toHex(buffer.slice(offset, 20));
 }
