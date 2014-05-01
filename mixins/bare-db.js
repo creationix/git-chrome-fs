@@ -5,6 +5,7 @@ var deflate = require('js-git/lib/deflate');
 var sha1 = require('git-sha1');
 var codec = require('js-git/lib/object-codec');
 var parsePackEntry = require('js-git/lib/pack-codec').parseEntry;
+var applyDelta = require('js-git/lib/apply-delta');
 
 var fileSystem = window.chrome.fileSystem;
 module.exports = function (repo, entry) {
@@ -36,7 +37,9 @@ function loadAs(type, hash, callback) {
     if (raw === undefined) return callback(err);
     var body;
     try {
-      if (sha1(raw) !== hash) throw new TypeError("Hash verification failure");
+      if (sha1(raw) !== hash) {
+        throw new TypeError("Hash verification failure");
+      }
       raw = codec.deframe(raw);
       if (raw.type !== type) throw new TypeError("Type mismatch");
       body = codec.decoders[raw.type](raw.body);
@@ -93,9 +96,9 @@ function loadRawPacked(repo, hash, callback) {
   });
   function start() {
     var packHash = packHashes.pop();
+    var offsets;
     if (!packHash) return callback();
-    var indexes = cachedIndexes[packHash];
-    if (!indexes) loadIndex(packHash);
+    if (!cachedIndexes[packHash]) loadIndex(packHash);
     else onIndex();
 
     function loadIndex() {
@@ -103,41 +106,62 @@ function loadRawPacked(repo, hash, callback) {
       readBinary(indexFile, function (err, buffer) {
         if (!buffer) return callback(err);
         try {
-          var result = parseIndex(buffer);
-          // TODO store result.checksum and check against packfile
-          indexes = result.indexes;
+          cachedIndexes[packHash] = parseIndex(buffer);
         }
         catch (err) { return callback(err); }
-        cachedIndexes[packHash] = indexes;
         onIndex();
       });
     }
 
     function onIndex() {
+      var cached = cachedIndexes[packHash];
       var packFile = pathJoin(packDir, "pack-" + packHash + ".pack" );
-      var index = indexes[hash];
+      var index = cached.byHash[hash];
       if (!index) return start();
-      readChunk(packFile, index.start, index.end, function (err, chunk) {
+      offsets = cached.offsets;
+      loadChunk(packFile, index.offset, callback);
+    }
+
+    function loadChunk(packFile, start, callback) {
+      var index = offsets.indexOf(start);
+      var end = index >= 0 ? offsets[index + 1] : -20;
+      readChunk(packFile, start, end, function (err, chunk) {
         if (!chunk) return callback(err);
         var raw;
         try {
           var entry = parsePackEntry(chunk);
           if (entry.type === "ref-delta") {
-            console.error(hash, entry)
-            throw new Error("TODO: Implement ref-delta");
+            return loadRaw.call(repo, hash, onBase);
           }
           else if (entry.type === "ofs-delta") {
-            console.error(hash, entry)
-            throw new Error("TODO: Implement ofs-delta");
+            return loadChunk(packFile, start - entry.ref, onBase);
           }
           raw = codec.frame(entry);
         }
         catch (err) { return callback(err); }
         callback(null, raw);
+
+        function onBase(err, base) {
+          if (!base) return callback(err);
+          var object = codec.deframe(base);
+          var body;
+          try {
+            body = applyDelta(entry.body, object.body);
+            console.log("BASE", bodec.toRaw(object.body));
+            console.log({DELTA: bodec.toRaw(entry.body)});
+            console.log("FINAL", bodec.toRaw(body));
+            object.body = body;
+            buffer = codec.frame(object);
+          }
+          catch (err) { return callback(err); }
+          callback(null, buffer);
+        }
       });
     }
+
   }
 }
+
 
 function saveRaw(hash, raw, callback) {
   if (!callback) return saveRaw.bind(this, hash, raw);
@@ -370,14 +394,19 @@ function parseIndex(buffer) {
   indexes.forEach(function (data, i) {
     var next = indexes[i + 1];
     byHash[data.hash] = {
+      offset: data.offset,
       crc: data.crc,
-      start: data.offset,
-      end: next ? next.offset : -20 // last item ends 20 bytes in from pack end.
     };
+  });
+  offsets = indexes.map(function (entry) {
+    return entry.offset;
+  }).sort(function (a, b) {
+    return a - b;
   });
 
   return {
-    indexes: byHash,
+    offsets: offsets,
+    byHash: byHash,
     checksum: packChecksum
   };
 }
