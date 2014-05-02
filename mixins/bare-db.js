@@ -9,7 +9,7 @@ module.exports = function (repo, entry) {
   function init(callback) {
     fileSystem.restoreEntry(entry, function (result) {
       if (result) {
-        var rootPath = repo.rootPath = pathJoin(result.fullPath);
+        var rootPath = repo.rootPath = pathJoin(result.filesystem.name, result.fullPath);
         entryCache[rootPath] = result;
         return callback();
       }
